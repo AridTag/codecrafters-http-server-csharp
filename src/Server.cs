@@ -2,6 +2,7 @@ using System.Buffers;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using Microsoft.Extensions.Logging;
 
 namespace HttpServer;
 
@@ -17,13 +18,28 @@ internal static class Program
 
     private static async Task RunServer(CancellationToken cancellationToken)
     {
+        using var childTokenSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        cancellationToken = childTokenSource.Token;
+        
+        var log = FauxLogger.Instance;
+
+        await TaskObserver.Instance.Start(cancellationToken);
+        
         _Listener = new TcpListener(IPAddress.Any, 4221);
         _Listener.Start();
+        log.LogInformation("Now accepting connections");
 
         while (!cancellationToken.IsCancellationRequested)
         {
-            using var client = await AcceptClient();
-            await client.HandleRequest();
+            var client = await AcceptClient();
+            TaskObserver.Instance.Register(client.HandleRequest().ContinueWith(t => client.Dispose(), CancellationToken.None));
+        }
+
+        await TaskObserver.Instance.StopWorker();
+
+        if (!childTokenSource.IsCancellationRequested)
+        {
+            childTokenSource.Cancel();
         }
         
         _Listener.Stop();
