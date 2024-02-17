@@ -26,7 +26,7 @@ internal sealed class ClientSession : IDisposable
             var requestLine = await _Reader.ReadLineAsync();
             if (string.IsNullOrWhiteSpace(requestLine))
             {
-                await _Stream.WriteAsync(Encoding.ASCII.GetBytes("HTTP/1.1 500 (╯°□°）╯︵ ┻━┻\r\n\r\n"));
+                await Send(new HttpResponse(StatusCode.InternalServerError, "(╯°□°）╯︵ ┻━┻"));
                 return;
             }
             
@@ -51,6 +51,31 @@ internal sealed class ClientSession : IDisposable
                     Content = split[1][EchoRoute.Length..]
                 };
                 await Send(response);
+                return;
+            }
+
+            const string UserAgentRoute = "/user-agent";
+            if (split[1].StartsWith(UserAgentRoute))
+            {
+                var headers = new List<string>();
+                var limiter = 0;
+                while (limiter < 10)
+                {
+                    ++limiter;
+                    var line = await _Reader.ReadLineAsync();
+                    if (string.IsNullOrWhiteSpace(line))
+                    {
+                        break;
+                    }
+                    headers.Add(line);
+                }
+                
+                var userAgent = headers.FirstOrDefault(h =>h.StartsWith("User-Agent:", StringComparison.OrdinalIgnoreCase));
+                if (!string.IsNullOrWhiteSpace(userAgent))
+                    await Send(new HttpResponse(StatusCode.OK) { Content = userAgent.Replace("User-Agent: ", string.Empty)});
+                else
+                    await Send(new HttpResponse(StatusCode.BadRequest));
+
                 return;
             }
             
@@ -79,7 +104,7 @@ internal sealed class ClientSession : IDisposable
 
     private async Task Send(HttpResponse response)
     {
-        await _Writer.WriteAsync($"{HttpResponse.Protocol} {(int)response.Status} {response.Status}\r\n");
+        await _Writer.WriteAsync($"{HttpResponse.Protocol} {(int)response.Status} {response.StatusMessage ?? response.Status.ToString()}\r\n");
         // TODO: Write other headers
         if (response.HasContent)
         {
@@ -109,7 +134,8 @@ public struct HttpResponse
     
     private string? _Content;
     
-    public StatusCode Status { get; set; }
+    public StatusCode Status { get; }
+    public string? StatusMessage { get; set; }
 
     public string? Content
     {
@@ -124,9 +150,10 @@ public struct HttpResponse
     [MemberNotNullWhen(true, nameof(Content))]
     public bool HasContent { get; private set; }
 
-    public HttpResponse(StatusCode status)
+    public HttpResponse(StatusCode status, string? statusMessage = null)
     {
         Status = status;
+        StatusMessage = statusMessage;
         _Content = null;
         HasContent = false;
     }
