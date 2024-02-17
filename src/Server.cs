@@ -1,9 +1,7 @@
-using System.Buffers;
 using System.CommandLine;
 using System.CommandLine.IO;
 using System.Net;
 using System.Net.Sockets;
-using System.Text;
 using Microsoft.Extensions.Logging;
 
 namespace HttpServer;

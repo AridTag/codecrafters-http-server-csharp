@@ -1,4 +1,5 @@
-﻿using System.Diagnostics.CodeAnalysis;
+﻿using System.Buffers;
+using System.Diagnostics.CodeAnalysis;
 using System.Net.Sockets;
 using System.Text.RegularExpressions;
 using HttpServer.Content;
@@ -7,13 +8,20 @@ using Microsoft.Extensions.Logging;
 namespace HttpServer;
 
 using RouteHandler = Func<RequestContext, Task<HttpResponse>>;
+using RouteHandlerMap = Dictionary<string, Func<RequestContext, Task<HttpResponse>>>;
+
+internal enum HttpAction
+{
+    Get,
+    Post
+}
 
 internal record struct RequestContext
 {
     public ClientSession Client;
     public ILogger Log;
     public string RequestPath;
-    // TODO: Headers etc 
+    public IReadOnlyDictionary<string, string> Headers;
 }
 
 internal class RequestHandler
@@ -23,7 +31,7 @@ internal class RequestHandler
     private const string UserAgentRoute = "/user-agent";
     private const string FilesBaseRoute = "/files/";
     
-    private readonly Dictionary<string, RouteHandler> _RouteHandlers;
+    private readonly Dictionary<HttpAction, RouteHandlerMap> _RouteHandlers;
     private readonly ILogger _Log = FauxLogger.Instance;
     private readonly DirectoryInfo? _FilesRoot;
 
@@ -31,12 +39,26 @@ internal class RequestHandler
     {
         _FilesRoot = filesRoot;
 
-        _RouteHandlers = new Dictionary<string, RouteHandler>
+        _RouteHandlers = new Dictionary<HttpAction, RouteHandlerMap>
         {
-            { IndexRoute, Index },
-            { $"{EchoBaseRoute}*", Echo },
-            { UserAgentRoute, UserAgent },
-            { $"{FilesBaseRoute}*", Files },
+            {
+                HttpAction.Get,
+                new RouteHandlerMap
+                {
+                    { IndexRoute, Index },
+                    { $"{EchoBaseRoute}*", Echo },
+                    { UserAgentRoute, UserAgent },
+                    { $"{FilesBaseRoute}*", Files },
+                }
+            },
+
+            {
+                HttpAction.Post,
+                new RouteHandlerMap
+                {
+                    { $"{FilesBaseRoute}*", PostFiles },
+                }
+            }
         };
     }
 
@@ -58,13 +80,15 @@ internal class RequestHandler
                 return;
             }
 
-            if (TryMatchPath(split[1], out var handler))
+            if (Enum.TryParse<HttpAction>(split[0], true, out var action)
+                && TryMatchPath(action, split[1], out var handler))
             {
                 var ctx = new RequestContext
                 {
                     Client = client,
                     Log = FauxLogger.Instance,
                     RequestPath = split[1],
+                    Headers = await ReadHeaders(client),
                 };
 
                 var response = await handler(ctx);
@@ -83,21 +107,27 @@ internal class RequestHandler
         }
     }
 
-    private bool TryMatchPath(string path, [MaybeNullWhen(false)] out RouteHandler handler)
+    private bool TryMatchPath(HttpAction action, string path, [MaybeNullWhen(false)] out RouteHandler handler)
     {
-        if (_RouteHandlers.TryGetValue(path, out handler))
+        if (!_RouteHandlers.TryGetValue(action, out var handlerMap))
+        {
+            handler = null;
+            return false;
+        }
+        
+        if (handlerMap.TryGetValue(path, out handler))
         {
             return true;
         }
         
-        var wildcardRoutes = _RouteHandlers.Keys.Where(k => k.Contains('*'));
+        var wildcardRoutes = handlerMap.Keys.Where(k => k.Contains('*'));
         foreach (var route in wildcardRoutes)
         {
             var pattern = route.Replace("*", ".*");
             var regex = new Regex(pattern);
             if (regex.IsMatch(path))
             {
-                handler = _RouteHandlers[route];
+                handler = handlerMap[route];
                 return true;
             }
         }
@@ -138,31 +168,65 @@ internal class RequestHandler
 
         return Task.FromResult(new HttpResponse(StatusCode.NotFound));
     }
-    
-    private async Task<HttpResponse> UserAgent(RequestContext ctx)
+
+    private async Task<HttpResponse> PostFiles(RequestContext ctx)
     {
-        var headers = new List<string>();
+        if (_FilesRoot == null)
+        {
+            return new HttpResponse(StatusCode.InternalServerError);
+        }
+
+        if (ctx.Headers.TryGetValue("Content-Length", out var contentLengthString)
+            && int.TryParse(contentLengthString, out var contentLength))
+        {
+            var destinationPath = ctx.RequestPath[FilesBaseRoute.Length.GetHashCode()..];
+            await using var fileStream = File.OpenWrite(Path.Combine(_FilesRoot.FullName, destinationPath));
+
+            var bytesRead = await ctx.Client.StreamReader.ReadInto(fileStream, contentLength, CancellationToken.None);
+            if (bytesRead != contentLength)
+            {
+                return new HttpResponse(StatusCode.InternalServerError, "Size mismatch");
+            }
+            
+            return new HttpResponse(StatusCode.Created);
+        }
+
+        return new HttpResponse(StatusCode.BadRequest);
+    }
+    
+    private Task<HttpResponse> UserAgent(RequestContext ctx)
+    {
+        if (ctx.Headers.TryGetValue("User-Agent", out var userAgent)
+            && !string.IsNullOrWhiteSpace(userAgent))
+        {
+            return Task.FromResult(new HttpResponse(StatusCode.OK)
+            {
+                Content = new PlainTextContent(userAgent.Replace("User-Agent: ", string.Empty))
+            });
+        }
+
+        return Task.FromResult(new HttpResponse(StatusCode.BadRequest));
+    }
+
+    private static async Task<Dictionary<string, string>> ReadHeaders(ClientSession client, int maxHeaders = 100)
+    {
+        var headers = new Dictionary<string, string>();
         var limiter = 0;
-        while (limiter < 10)
+        while (limiter < maxHeaders)
         {
             ++limiter;
-            var line = await ctx.Client.ReadLine();
+            var line = await client.ReadLine();
             if (string.IsNullOrWhiteSpace(line))
             {
                 break;
             }
-            headers.Add(line);
-        }
-                
-        var userAgent = headers.FirstOrDefault(h =>h.StartsWith("User-Agent:", StringComparison.OrdinalIgnoreCase));
-        if (!string.IsNullOrWhiteSpace(userAgent))
-        {
-            return new HttpResponse(StatusCode.OK)
+            var split = line.Split(':', 2, StringSplitOptions.TrimEntries);
+            if (split.Length == 2)
             {
-                Content = new PlainTextContent(userAgent.Replace("User-Agent: ", string.Empty))
-            };
+                // TODO: This isn't safe
+                headers.Add(split[0], split[1]);
+            }
         }
-
-        return new HttpResponse(StatusCode.BadRequest);
+        return headers;
     }
 }

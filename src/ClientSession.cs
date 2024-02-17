@@ -6,20 +6,23 @@ internal sealed class ClientSession : IDisposable
 {
     private readonly TcpClient _TcpClient;
     private readonly NetworkStream _Stream;
-    private readonly StreamReader _Reader;
+    private readonly CustomStreamReader _Reader;
     private readonly StreamWriter _Writer;
 
     public ClientSession(TcpClient tcpClient)
     {
         _TcpClient = tcpClient;
         _Stream = _TcpClient.GetStream();
-        _Reader = new StreamReader(_Stream);
+        _Reader = new CustomStreamReader(_Stream);
         _Writer = new StreamWriter(_Stream);
     }
+    
+    public CustomStreamReader StreamReader => _Reader;
+    public StreamWriter StreamWriter => _Writer;
 
     public Task<string?> ReadLine()
     {
-        return _Reader.ReadLineAsync();
+        return _Reader.ReadLine();
     }
 
     public void Dispose()
