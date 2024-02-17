@@ -11,10 +11,16 @@ internal static class Program
     
     public static async Task Main(string[] args)
     {
+        var cancellation = new CancellationTokenSource();
+        await RunServer(cancellation.Token);
+    }
+
+    private static async Task RunServer(CancellationToken cancellationToken)
+    {
         _Listener = new TcpListener(IPAddress.Any, 4221);
         _Listener.Start();
 
-        while (true)
+        while (!cancellationToken.IsCancellationRequested)
         {
             using var client = await AcceptClient();
             await client.HandleRequest();
