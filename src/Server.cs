@@ -3,33 +3,29 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 
-var server = new TcpListener(IPAddress.Any, 4221);
-server.Start();
+namespace HttpServer;
 
-var buffer = new Memory<byte>(new byte[1024], 0, 1024);
-while (true)
+internal static class Program
 {
-    using var client = await server.AcceptTcpClientAsync();
-
-    try
+    private static TcpListener _Listener = null!;
+    
+    public static async Task Main(string[] args)
     {
-        NetworkStream clientStream = client.GetStream();
-        var bytesRead = await clientStream.ReadAsync(buffer);
-        var request = Encoding.ASCII.GetString(buffer.Span[..bytesRead]);
-        var response = Encoding.ASCII.GetBytes("HTTP/1.1 200 OK\r\n\r\n");
-        await clientStream.WriteAsync(response);
+        _Listener = new TcpListener(IPAddress.Any, 4221);
+        _Listener.Start();
+
+        while (true)
+        {
+            using var client = await AcceptClient();
+            await client.HandleRequest();
+        }
+        
+        _Listener.Stop();
     }
-    catch (SocketException ex)
-    {
-        if (ex.SocketErrorCode == SocketError.ConnectionReset)
-        {
-            Console.WriteLine("Client severed connection");
-        }
-        else
-        {
-            Console.WriteLine(ex.SocketErrorCode);
-        }
 
-        break;
+    private static async Task<ClientSession> AcceptClient()
+    {
+        var client = await _Listener.AcceptTcpClientAsync();
+        return new ClientSession(client);
     }
 }
